@@ -24,8 +24,10 @@
 #include <eosiolib/print.hpp>
 #include <eosiolib/transaction.hpp>
 
-#include "mydate.hpp"
-#include "utils.hpp"
+#include "../../common/mydate.hpp"
+#include "../../common/utils.hpp"
+
+#define EOS_SYMBOL S(4,EOS) 
 
 using namespace eosio;
 
@@ -34,6 +36,8 @@ class bolao : public eosio::contract
   const uint8_t __OPEN = 1;
   const uint8_t __DEADLINE = 2;
   const uint8_t __CLOSED = 3;
+
+  const account_name contract_fee_account = N(feebarbeting);
 
 public:
   using contract::contract;
@@ -50,22 +54,37 @@ public:
     auto itgame = games.find(idgame);
     eosio_assert(itgame != games.end(), "Game not found");
     const auto &game = *itgame;
-
-    eosio_assert(game.status == __CLOSED, "Game not closed");
-
+    
     //find bets to game identified by idgame
     bet_index bets(_self, _self);
     auto index = bets.get_index<N(idgame)>();
-    auto itbet = index.find(idgame);
 
+    auto itbet = index.find(idgame);
+    int count = 0;
     while (itbet != index.end()){
       if (itbet->idgame != idgame)
         break;
-     
-      itbet = index.erase(itbet);
+      
+      ++itbet;
+      count ++;
     }
-    
-    games.erase(game);
+
+    if (count > 0) {
+      eosio_assert(game.status == __CLOSED, "Game not closed");
+
+      auto itbet = index.find(idgame);
+
+      while (itbet != index.end()){
+        if (itbet->idgame != idgame)
+          break;
+     
+        itbet = index.erase(itbet);
+      }
+
+      games.erase(game);
+    } else {
+      games.erase(game);
+    }
   }
 
   //@abi action
@@ -81,6 +100,8 @@ public:
     auto itgame = games.find(idgame);
     eosio_assert(itgame != games.end(), "Game not found");
     const auto &game = *itgame;
+    
+    eosio_assert(game.status != __CLOSED, "Game closed");
 
     //update game status
     updategamest(idgame);
@@ -134,14 +155,14 @@ public:
         {
           players.emplace(_self, [&](auto &p) {
             p.id = itbet->player;
-            p.eos_balance = asset(itbet->value.amount * amountliquid / amount);
+            p.eos_balance = asset(itbet->value.amount * amountliquid / amount, EOS_SYMBOL);
           });
         }
         else
         {          
           const auto &winplayer = *itplayer;
           players.modify(winplayer, 0, [&](auto &a) {         
-            a.eos_balance += asset(itbet->value.amount * amountliquid / amount);
+            a.eos_balance += asset(itbet->value.amount * amountliquid / amount, EOS_SYMBOL);
           });
         }
       }
@@ -163,14 +184,14 @@ public:
           {
             players.emplace(_self, [&](auto &p) {
               p.id = itbet->player;
-              p.eos_balance = asset(itbet->value.amount * amountliquid / amount_winner);
+              p.eos_balance = asset(itbet->value.amount * amountliquid / amount_winner, EOS_SYMBOL);
             });
           }
           else
           {
             const auto &winplayer = *itplayer;
             players.modify(winplayer, 0, [&](auto &a) {
-              a.eos_balance += asset(itbet->value.amount * amountliquid / amount_winner);
+              a.eos_balance += asset(itbet->value.amount * amountliquid / amount_winner, EOS_SYMBOL);
             });
           }
         }
@@ -180,8 +201,15 @@ public:
     games.modify(game, 0, [&](auto &g) {
       g.status = __CLOSED;
     });
+
+    asset fee_asset(fee, EOS_SYMBOL);    
+    action(permission_level{_self, N(active)},
+           N(eosio.token), N(transfer),
+           std::make_tuple(_self, contract_fee_account, fee_asset, std::string("__FEE")))
+        .send();
   }
 
+  /*
   //@abi action
   void newbet(const account_name from,
               const uint64_t idgame,
@@ -202,7 +230,8 @@ public:
         std::make_tuple(from, _self, value, std::string("__NEWBET")))
         .send();
   }
-
+  */
+  
   //@abi action
   void claim(const account_name name)
   {
@@ -241,11 +270,11 @@ public:
   {
     require_auth(_self);
 
-    eosio_assert(value_min.symbol == CORE_SYMBOL, "only core token allowed");
+    eosio_assert(value_min.symbol == EOS_SYMBOL, "token not allowed");
     eosio_assert(value_min.is_valid(), "invalid bet");
     eosio_assert(value_min.amount > 0, "must bet positive quantity");
 
-    eosio_assert(value_max.symbol == CORE_SYMBOL, "only core token allowed");
+    eosio_assert(value_max.symbol == EOS_SYMBOL, "token not allowed");
     eosio_assert(value_max.is_valid(), "invalid bet");
     eosio_assert(value_max.amount > 0, "must bet positive quantity");
 
@@ -334,6 +363,9 @@ public:
     if(memo == "__NEWBET")
         return;
 
+    if(memo == "__FEE")
+        return;
+
     vector<string> v;
     split(memo, ',', v);
 
@@ -360,6 +392,10 @@ void newbet_aux(const account_name from,
     auto itgame = games.find(idgame);
     eosio_assert(itgame != games.end(), "Game not found");
     const auto &game = *itgame;
+    
+    eosio_assert(game.value_max >= value, "bet too big");
+    eosio_assert(game.value_min <= value, "bet too small");
+    eosio_assert(game.status == __OPEN, "Not open for betting");
 
     //find bets to game identified by idgame
     bet_index bets(_self, _self);
@@ -369,10 +405,6 @@ void newbet_aux(const account_name from,
       if (itbet->idgame != idgame) break;
       eosio_assert(itbet->player != from, "This account just have a bet");  
     }
-
-    eosio_assert(game.value_max >= value, "bet too big");
-    eosio_assert(game.value_min <= value, "bet too small");
-    eosio_assert(game.status == __OPEN, "Not open for betting");
 
     bets.emplace(_self, [&](auto &b) {
       b.id = bets.available_primary_key();
@@ -471,7 +503,7 @@ extern "C" { \
 
 EOSIO_ABI_EX(bolao, 
    (newgame)
-   (newbet)
+   //(newbet)
    (finalize)
    (claim)
    (updategamest)
